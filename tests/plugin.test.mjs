@@ -8,6 +8,8 @@ const BGE = "@cf/baai/bge-m3";
 const RERANK = "@cf/baai/bge-reranker-base";
 const FLASH = "@cf/cloudflare/clef-flash";
 const CLEF = "@cf/cloudflare/clef";
+const JEV = "jev-latest";
+const TYPESAFE = "https://api.typesafe.ai";
 const decode = (action, payload) => native[action]({ body: { kind: "json", value: payload } });
 function context(intent) {
   // Mirrors the real NewAPI auth: api_key yields a BARE authHeader.
@@ -15,20 +17,24 @@ function context(intent) {
 }
 const parse = (ctx, result) => parseSubmitResponse(ctx, { statusCode: 200, body: result });
 
-test("manifest offers exactly three separate native routes, never claims unavailable host protocols", () => {
+test("manifest offers four native routes including unified System One, never claims unavailable host protocols", () => {
   assert.equal(meta.apiVersion, 1);
   assert.equal(meta.fetchMode, "per_task");
   assert.deepEqual(meta.routes.map((r) => r.path), [
     "/cloudflare/v1/embeddings",
     "/cloudflare/v1/rerank",
     "/cloudflare/v1/systemone",
+    "/decision/v1/systemone",
   ]);
   for (const route of meta.routes) {
     assert.equal(route.retainResult, false);
     assert.equal(route.type, "submit");
   }
   assert.equal(meta.protocols, undefined);
-  assert.equal(meta.models.length, 5);
+  assert.deepEqual(meta.requiredCapabilities, ["json-order@1"]);
+  assert.equal(meta.models.length, 6);
+  assert.deepEqual(meta.routes[3].models, [JEV]);
+  assert.deepEqual(Object.keys(meta.usageSchema).sort(), ["input_rate", "input_tokens"]);
 });
 
 test("embeddings normalize a single input, use native account-scoped OpenAI endpoint", () => {
@@ -45,7 +51,7 @@ test("embeddings normalize a single input, use native account-scoped OpenAI endp
   assert.equal(result.taskData.data[0].embedding.length, 2);
   assert.equal(result.taskData.usage.input_tokens, 4);
   assert.deepEqual(native.render({}, { data: result.taskData }), result.taskData);
-  assert.deepEqual(extractUsageOnComplete({}, null, result.taskData), { input_tokens: 4 });
+  assert.deepEqual(extractUsageOnComplete(context(req), null, result.taskData), { input_tokens: 4, input_rate: 0.0118 });
 });
 
 test("Cloudflare always receives Bearer channel API key; never raw ctx.authHeader", () => {
@@ -133,7 +139,7 @@ test("Clef Flash maps model selector and returns matching typed decisions", () =
     model: "clef-flash", answers: { urgent: { type: "noul", value: 0.99 } }, usage: { input_tokens: 123 },
   } });
   assert.equal(parsed.taskData.answers.urgent.type, "noul");
-  assert.deepEqual(extractUsageOnComplete({}, null, parsed.taskData), { input_tokens: 123 });
+  assert.deepEqual(extractUsageOnComplete(ctx, null, parsed.taskData), { input_tokens: 123, input_rate: 0.038 });
 });
 
 test("Clef original selector and safe conservative reservations", () => {
@@ -146,6 +152,82 @@ test("Clef original selector and safe conservative reservations", () => {
     model: FLASH, state: "check", questions: { urgent: { type: "noul" } },
   }));
   assert.equal(extractUsage(flashReq).input_tokens, 24576);
+});
+
+test("TypeSafe Jev primary keeps jev-latest and uses the official System One endpoint", () => {
+  const questions = {
+    urgent: { type: "noul", instructions: "Is it urgent?" },
+    team: { type: "choice", instructions: { category: "team" }, criteria: { engineering: "Engineering" } },
+  };
+  const req = decode("systemone", { model: JEV, state: { incident: "outage" }, questions });
+  const ctx = { ...context(req), baseUrl: TYPESAFE };
+  const sent = buildSubmitRequest(ctx);
+  assert.equal(sent.url, TYPESAFE + "/v1/systemone");
+  assert.equal(sent.body.model, JEV);
+  assert.deepEqual(sent.body.questions, questions);
+  assert.equal(sent.headers.Authorization, "Bearer test-only");
+  const result = parse(ctx, {
+    model: "jev-1.13.0",
+    answers: {
+      urgent: { type: "noul", noul: 0.97 },
+      team: { type: "choice", choice: "engineering", probabilities: { engineering: 1 } },
+    },
+    usage: { input_tokens: 350, output_tokens: 0 },
+  });
+  assert.equal(result.taskData.answers.urgent.noul, 0.97);
+  assert.equal(result.taskData.answers.team.choice, "engineering");
+  assert.equal(result.taskData.model, JEV);
+  assert.deepEqual(extractUsage(ctx), { input_tokens: 65536, input_rate: 0.042 });
+  assert.deepEqual(extractUsageOnComplete(ctx, null, result.taskData), { input_tokens: 350, input_rate: 0.042 });
+});
+
+test("the same jev-latest client request maps to Cloudflare Clef Flash on fallback channel", () => {
+  const req = decode("systemone", {
+    model: JEV, state: { issue: "payment failed" },
+    questions: { urgent: { type: "noul", instructions: "Urgent?" } },
+  });
+  const ctx = { ...context(req), upstreamModel: FLASH };
+  const sent = buildSubmitRequest(ctx);
+  assert.equal(sent.url, BASE + "/run/" + FLASH);
+  assert.equal(sent.body.model, "clef-flash");
+  assert.equal(sent.headers.Authorization, "Bearer test-only");
+  assert.equal(sent.body.state.issue, "payment failed");
+  const result = parse(ctx, {
+    success: true, result: { model: "clef-flash", answers: { urgent: { type: "noul", noul: 0.93 } }, usage: { input_tokens: 420 } },
+  });
+  assert.equal(result.taskData.model, JEV);
+  assert.equal(result.taskData.answers.urgent.noul, 0.93);
+  assert.deepEqual(extractUsage(ctx), { input_tokens: 24576, input_rate: 0.038 });
+  assert.deepEqual(extractUsageOnComplete(ctx, null, result.taskData), { input_tokens: 420, input_rate: 0.038 });
+});
+
+test("Jev allows larger batches but fallback never truncates Cloudflare's 64-question limit", () => {
+  const questions = {};
+  for (let i = 0; i < 65; i++) questions["q_" + i] = { type: "noul", instructions: "Evaluate?" };
+  const req = decode("systemone", { model: JEV, state: "state", questions });
+  const primary = { ...context(req), baseUrl: TYPESAFE };
+  const backup = { ...context(req), upstreamModel: FLASH };
+  assert.equal(Object.keys(buildSubmitRequest(primary).body.questions).length, 65);
+  assert.throws(() => buildSubmitRequest(backup), /64 questions.*No answers were dropped/);
+});
+
+test("TypeSafe usage missing/invalid is never silently estimated", () => {
+  const req = decode("systemone", {
+    model: JEV, state: "check", questions: { urgent: { type: "noul" } },
+  });
+  const ctx = { ...context(req), baseUrl: TYPESAFE };
+  assert.throws(() => parse(ctx, { model: JEV, answers: { urgent: { type: "noul", noul: 1 } } }), /TypeSafe input token usage/);
+});
+
+test("provider/credential mismatches cannot redirect Jev traffic to unapproved hosts", () => {
+  const req = decode("systemone", {
+    model: JEV, state: "check", questions: { urgent: { type: "noul" } },
+  });
+  const ctx = context(req);
+  assert.throws(() => buildSubmitRequest(ctx), /mapping to Clef/);
+  assert.throws(() => buildSubmitRequest({ ...ctx, upstreamModel: FLASH, baseUrl: TYPESAFE }), /TypeSafe channels/);
+  assert.throws(() => buildSubmitRequest({ ...ctx, upstreamModel: JEV, baseUrl: "https://api.typesafe.ai.evil.example" }), /Base URL/);
+  assert.throws(() => buildSubmitRequest({ ...context(decode("embeddings", { model: QWEN, input: "x" })), baseUrl: TYPESAFE }), /Cloudflare embedding channel/);
 });
 
 test("cannot redirect API credentials to arbitrary hosts or construct arbitrary model URL", () => {

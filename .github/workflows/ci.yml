@@ -16,6 +16,19 @@ jobs:
           node-version: "24"
       - run: node --check plugin.js
       - run: npm test
+      - name: Verify bundled icon is well-formed, self-contained SVG
+        run: |
+          python3 - <<'PY'
+          from xml.etree import ElementTree as ET
+          root = ET.parse('icon.svg').getroot()
+          assert root.tag == '{http://www.w3.org/2000/svg}svg'
+          assert root.attrib.get('viewBox') == '0 0 96 96'
+          nodes = list(root.iter())
+          assert len(nodes) < 64
+          assert not any(node.tag.split('}')[-1] in ('script', 'foreignObject', 'image') for node in nodes)
+          assert not any(key.lower().startswith('on') or 'javascript:' in value.lower() for node in nodes for key, value in node.attrib.items())
+          print('Plugin icon SVG validated')
+          PY
   newapi-plugin-lint:
     runs-on: ubuntu-latest
     steps:

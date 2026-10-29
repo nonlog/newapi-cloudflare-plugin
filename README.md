@@ -1,55 +1,77 @@
-# NewAPI Cloudflare Workers AI Task Plugin
+# Cloudflare AI + TypeSafe — NewAPI Task Plugin
 
-This is a user-owned **Task Plugin API v1** extension for Cloudflare Workers AI Embeddings, Rerank and Clef decision models. No intermediary Worker, reverse proxy, NewAPI fork or embedded secrets are required.
+An installable, user-owned [NewAPI Task Plugin API v1](https://github.com/QuantumNous/new-api/blob/main/docs/plugin-api/v1.md) adapter for **Cloudflare Workers AI Embeddings**, **Rerank**, and unified **TypeSafe Jev → Cloudflare Clef Flash** decisions. No NewAPI fork, patched TypeSafe plugin, intermediary Cloudflare Worker or separate sidecar is required.
 
-**Important limitation:** The current official Task Plugin host does NOT allow plugins to take over the standard POST /v1/embeddings and POST /v1/rerank endpoints. This plugin registers its own native routes. Keep existing channels for clients requiring those original URLs.
+![Plugin icon](icon.svg)
 
-## Native routes
+## API routes
 
-| Route | Models | Function |
-| --- | --- | --- |
-| POST /cloudflare/v1/embeddings | @cf/qwen/qwen3-embedding-0.6b; @cf/baai/bge-m3 | Cloudflare OpenAI-compatible embedding |
-| POST /cloudflare/v1/rerank | @cf/baai/bge-reranker-base | Cloudflare native rerank, Jina-style response |
-| POST /cloudflare/v1/systemone | @cf/cloudflare/clef; @cf/cloudflare/clef-flash | Cloudflare native System One decisions |
+| API route (POST) | Client model | Upstream | Usage |
+| --- | --- | --- | --- |
+| `/cloudflare/v1/embeddings` | `@cf/qwen/qwen3-embedding-0.6b`, `@cf/baai/bge-m3` | Cloudflare Workers AI | OpenAI-compatible embedding responses |
+| `/cloudflare/v1/rerank` | `@cf/baai/bge-reranker-base` | Cloudflare Workers AI | Jina-style rerank response |
+| `/cloudflare/v1/systemone` | `@cf/cloudflare/clef`, `@cf/cloudflare/clef-flash` | Cloudflare Workers AI | Direct Clef decisions |
+| **`/decision/v1/systemone`** | **`jev-latest`** | **TypeSafe primary, Cloudflare Clef Flash fallback** | Unified System One protocol |
 
-All requests use **Authorization: Bearer YOUR_NEWAPI_USER_TOKEN**. The plugin uses the bound channel's Cloudflare API token for outgoing authenticated requests.
+Use `Authorization: Bearer NEWAPI_USER_TOKEN` at all paths.
 
-## Install into NewAPI
+## Production setup: keep the official TypeSafe plugin
 
-1. Upload plugin.js in **Task Plugins**, activate plugin key **cloudflare-ai**.
-2. Create **one type-61 Task Plugin channel for each Cloudflare account**, select cloudflare-ai, and configure the respective channel API key and Base URL:
-   https://api.cloudflare.com/client/v4/accounts/ACCOUNT_ID/ai
-3. Set allowed models, groups, priorities, weights, and explicit input-token pricing before exposing the channels.
-4. Test the three new native routes with a NewAPI user token, then migrate compatible clients individually.
+The original official **TypeSafe** channel (e.g. #79) remains active and unchanged. It continues to own `POST /typesafe/v1/systemone`.
 
-A single plugin installation covers both Cloudflare accounts, but two accounts still require two channels because NewAPI keeps and routes channel credentials individually.
+To offer TypeSafe → Cloudflare automatic failover on a different prefix:
 
-### Sample requests
+1. Install `plugin.js` as key `cloudflare-ai`, version `0.2.0`, using `icon.svg` as the plugin's optional SVG icon file.
+2. Create a new **type-61 Task Plugin channel**, bound to `cloudflare-ai`, with TypeSafe **official** base URL `https://api.typesafe.ai`, the same TypeSafe channel key, models `jev-latest`, group `default`, **priority 2**.
+3. On the existing Cloudflare `cloudflare-ai` channel, keep the five declared Cloudflare model IDs. Add `jev-latest` as a *client-facing alias*, with **model mapping**:
 
-Embedding request body:
+   `{"jev-latest":"@cf/cloudflare/clef-flash"}`
 
-    {"model":"@cf/qwen/qwen3-embedding-0.6b","input":["hello","world"]}
+   Keep it in `default` group at **priority 1**. The actual Cloudflare account key and base URL remain the same.
+4. Add the **billing expression** `cloudflare-ai::jev-latest`:
 
-Rerank request body:
+   `tier("base", u("input_tokens") * u("input_rate") / 1000000)`
 
-    {"model":"@cf/baai/bge-reranker-base","query":"What is RAG?","documents":["RAG retrieves passages.","Cars need fuel."],"top_n":1,"return_documents":true}
+   The plugin reports a per-upstream rate (TypeSafe Jev `0.042`; Cloudflare Clef Flash `0.038`, USD per million input tokens), to prevent charging the fallback at TypeSafe's rate.
+5. Point clients using System One decision requests to base URL `http://new-api:3000/decision` instead of `http://new-api:3000/typesafe`. **Do not change the model** `jev-latest`, provider mode `typesafe`, or NewAPI bearer token.
 
-Decision request body:
+NewAPI Task Plugin's built-in retry machinery picks the next priority level for retryable submissions (such as HTTP 429 and supported 5xx failures). User-invalid requests and nonretryable statuses **do not** automatically fail over. A strict session affinity or pinned channel can also suppress retry.
 
-    {"model":"@cf/cloudflare/clef-flash","state":"Checkout is failing.","questions":{"urgent":{"type":"noul","instructions":"Is this urgent?"}}}
+The original TypeSafe plugin and its route stay installed, so other clients using `/typesafe/v1/systemone` are not affected.
 
-## Existing production channels
+### Example unified decision request
 
-- #6 and #82: currently serve standard OpenAI embedding requests for two different accounts. **Keep them** while existing clients use /v1/embeddings.
-- #81: existing Hindsight rerank Worker. **Keep it** while Hindsight uses standard /v1/rerank; only remove the Worker after a compatible endpoint and RAG regression check.
-- #83 and #84: currently use the official typesafe plugin for Clef Flash. That official plugin accepts Jev model IDs only, so this is not a valid Clef route. Once the new plugin's System One route is validated, replace those bindings.
+```json
+{
+  "model": "jev-latest",
+  "state": { "incident": "Checkout unavailable" },
+  "questions": {
+    "urgent": { "type": "noul", "instructions": "Is immediate action required?" }
+  }
+}
+```
 
-The plugin's input-token accounting uses upstream usage when present. Some Workers AI endpoints omit usage; then the plugin uses a **clearly approximate** character-based estimate. Do not treat those numbers as a Cloudflare invoice. These synchronous operations still create NewAPI task billing rows; high-volume embedding traffic is usually better served by the existing native embedding channels.
+The primary upstream receives `model:"jev-latest"`. The Cloudflare fallback receives `model:"clef-flash"` at the native Workers AI `/ai/run/@cf/cloudflare/clef-flash` API, while the client-facing model remains `jev-latest`.
 
-Limitations: only text embeddings/rerank and JSON/text decision state; Clef image input is deliberately rejected. The plugin does not add generic account/key management, new standard protocol handlers or untested streaming formats.
+## Safety and compatibility boundaries
 
-To get a truly drop-in /v1/embeddings and /v1/rerank plugin, upstream NewAPI must add those host protocols to its JS plugin registry. No upstream code is modified here.
+- **Clef accepts up to 64 typed questions per request**, while Jev accepts larger batches. The fallback refuses requests over 64 questions **without truncation**. The official Task Plugin v1 API accounts for a single billable upstream request per submission; silently making unaccounted-for extra inference calls through a fetch helper is not supported. Splitting a large fallback batch must be done by the client or in a future upstream-supported batch execution API.
+- Cloudflare **Clef Flash** currently has a **24K input-token context**; TypeSafe Jev supports up to 64K. Very large Jev requests may not have a usable fallback even when they contain 64 or fewer questions.
+- The plugin preserves request JSON member order using the host `json-order@1` capability because Jev may interpret JSON order.
+- The plugin accepts textual and structured `state`, with `noul`, `choice` and `score` questions. Image/media input is explicitly rejected.
+- The **standard** `/v1/embeddings` and `/v1/rerank` remain **host-owned** NewAPI endpoints. The current Task Plugin API has no host protocol hooks for either; consumers must use the plugin's prefixed routes. Hindsight's OpenAI SDK can use `/cloudflare/v1/embeddings` by setting its Embeddings Base URL to `.../cloudflare/v1`.
+- Credentials come only from the selected NewAPI channel and are never embedded in source, logs, or GitHub Actions.
 
-## Verification and build policy
+## Icon
 
-Run all tests and formal validation **only in GitHub Actions**. The CI validates Node unit cases and uses the unmodified official NewAPI plugin linter to compile and verify the plugin contract.
+`icon.svg` is a self-contained, minimal vector app icon designed for light and dark backgrounds: a cloud plus two diverging decision routes. NewAPI takes the image separately from the JavaScript manifest when installing or upgrading Task Plugins; `meta.icon: "text:AI"` is only the fallback when an image has not yet been uploaded.
+
+## Quality gate
+
+Every change is tested and formally validated **via GitHub Actions only**:
+
+- Node 24 unit tests for Embedding, Rerank, Jev, mapped Clef fallback, billing rates, and malformed requests.
+- Self-contained SVG validation.
+- Compilation and lint using the unmodified upstream NewAPI Task Plugin CLI.
+
+Source modifications and deployment changes never alter NewAPI or TypeSafe upstream code.
