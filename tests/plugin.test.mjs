@@ -10,7 +10,8 @@ const FLASH = "@cf/cloudflare/clef-flash";
 const CLEF = "@cf/cloudflare/clef";
 const decode = (action, payload) => native[action]({ body: { kind: "json", value: payload } });
 function context(intent) {
-  return { ...intent, baseUrl: BASE, apiKey: "test-only", upstreamModel: intent.model, publicTaskId: "task-test" };
+  // Mirrors the real NewAPI auth: api_key yields a BARE authHeader.
+  return { ...intent, baseUrl: BASE, apiKey: "test-only", authHeader: "test-only", upstreamModel: intent.model, publicTaskId: "task-test" };
 }
 const parse = (ctx, result) => parseSubmitResponse(ctx, { statusCode: 200, body: result });
 
@@ -45,6 +46,19 @@ test("embeddings normalize a single input, use native account-scoped OpenAI endp
   assert.equal(result.taskData.usage.input_tokens, 4);
   assert.deepEqual(native.render({}, { data: result.taskData }), result.taskData);
   assert.deepEqual(extractUsageOnComplete({}, null, result.taskData), { input_tokens: 4 });
+});
+
+test("Cloudflare always receives Bearer channel API key; never raw ctx.authHeader", () => {
+  for (const intent of [
+    decode("embeddings", { model: QWEN, input: "hello" }),
+    decode("rerank", { model: RERANK, query: "hello", documents: ["world"] }),
+    decode("systemone", { model: FLASH, state: "hello", questions: { answer: { type: "noul" } } }),
+  ]) {
+    const ctx = context(intent);
+    assert.equal(ctx.authHeader, "test-only");
+    assert.equal(buildSubmitRequest(ctx).headers.Authorization, "Bearer test-only");
+    assert.equal(buildSubmitRequest({ ...ctx, authHeader: "Bearer wrong-token" }).headers.Authorization, "Bearer test-only");
+  }
 });
 
 test("embeddings support the Cloudflare data-of-vectors format and missing usage", () => {

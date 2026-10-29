@@ -10,7 +10,7 @@ export const meta = {
   apiVersion: 1,
   key: "cloudflare-ai",
   name: "Cloudflare Workers AI",
-  version: "0.1.0",
+  version: "0.1.1",
   author: { name: "nonlog", url: "https://github.com/nonlog" },
   website: "https://developers.cloudflare.com/workers-ai/",
   icon: "text:CF",
@@ -145,9 +145,11 @@ function estimatedInput(ctx) {
 export function buildSubmitRequest(ctx) {
   const base = apiBase(ctx.baseUrl);
   const model = modelOf(ctx);
-  const auth = ctx.authHeader || (ctx.apiKey ? "Bearer " + ctx.apiKey : "");
-  if (!auth) fail("Missing Cloudflare channel API key");
-  const headers = { Authorization: auth, "Content-Type": "application/json", Accept: "application/json" };
+  // NewAPI's official API-key auth provides ctx.authHeader as the BARE key,
+  // not an HTTP Authorization header. Cloudflare requires Bearer credentials.
+  // Use the channel's actual key, never a user-supplied incoming header.
+  if (typeof ctx.apiKey !== "string" || !ctx.apiKey.trim()) fail("Missing Cloudflare channel API key");
+  const headers = { Authorization: "Bearer " + ctx.apiKey.trim(), "Content-Type": "application/json", Accept: "application/json" };
   const body = ctx.requestBody;
   if (!object(body)) fail("Missing normalized request body");
   if (ctx.action === "embeddings") {
