@@ -1,0 +1,35 @@
+name: Plugin CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  node-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: node --check plugin.js
+      - run: npm test
+  newapi-plugin-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out official NewAPI host (read-only)
+        run: git clone --depth 1 https://github.com/QuantumNous/new-api.git .upstream/new-api
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: .upstream/new-api/go.mod
+          cache: true
+          cache-dependency-path: .upstream/new-api/go.sum
+      - name: Validate with official NewAPI plugin runtime
+        working-directory: .upstream/new-api
+        run: |
+          mkdir -p web/dist
+          printf '<html><body>CI-only placeholder</body></html>' > web/dist/index.html
+          go run . plugin lint ../../plugin.js
