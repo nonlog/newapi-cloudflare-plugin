@@ -69,9 +69,30 @@ test("embeddings support the Cloudflare data-of-vectors format and missing usage
   assert.ok(result.taskData.usage.input_tokens > 0);
 });
 
-test("embeddings reject unsupported token arrays and a conflicting encoding", () => {
+test("OpenAI Python SDK defaults to base64: route still returns float vectors", () => {
+  const req = decode("embeddings", {
+    model: QWEN,
+    input: ["first document", "second document"],
+    encoding_format: "base64",
+  });
+  const ctx = context(req);
+  const upstream = buildSubmitRequest(ctx);
+  assert.equal(upstream.body.encoding_format, "float");
+  assert.deepEqual(upstream.body.input, ["first document", "second document"]);
+  const result = parse(ctx, {
+    success: true,
+    result: { data: [{ embedding: [0.2, 0.8] }, { embedding: [0.6, 0.4] }] },
+  });
+  assert.equal(result.taskData.data.length, 2);
+  assert.deepEqual(result.taskData.data.map((row) => row.index), [0, 1]);
+  assert.deepEqual(result.taskData.data[0].embedding, [0.2, 0.8]);
+  assert.equal(result.taskData.object, "list");
+  assert.equal(result.taskData.usage.total_tokens, result.taskData.usage.prompt_tokens);
+});
+
+test("embeddings reject unsupported token arrays and unknown encodings", () => {
   assert.throws(() => decode("embeddings", { model: QWEN, input: [[1, 2]] }), /input item/);
-  assert.throws(() => decode("embeddings", { model: QWEN, input: "test", encoding_format: "base64" }), /float/);
+  assert.throws(() => decode("embeddings", { model: QWEN, input: "test", encoding_format: "packed64" }), /float or base64/);
   assert.throws(() => decode("embeddings", { model: RERANK, input: "test" }), /Unsupported model/);
 });
 

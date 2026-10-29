@@ -10,7 +10,7 @@ export const meta = {
   apiVersion: 1,
   key: "cloudflare-ai",
   name: "Cloudflare Workers AI",
-  version: "0.1.1",
+  version: "0.1.2",
   author: { name: "nonlog", url: "https://github.com/nonlog" },
   website: "https://developers.cloudflare.com/workers-ai/",
   icon: "text:CF",
@@ -63,7 +63,12 @@ function textArray(v) {
 function validateEmbeddings(body) {
   requireModel(body, EMBED);
   const input = textArray(body.input);
-  if (body.encoding_format !== undefined && body.encoding_format !== "float") fail("Only float embeddings are supported");
+  // The OpenAI Python SDK sends encoding_format="base64" by default, but
+  // accepts an array of float values in its response and leaves it unchanged.
+  // Cloudflare's embedding API serves float vectors, so translate that SDK
+  // hint to float rather than rejecting an otherwise valid request.
+  if (body.encoding_format !== undefined && body.encoding_format !== "float" &&
+      body.encoding_format !== "base64") fail("Only float or base64 embedding requests are supported");
   return { model: body.model, input, encoding_format: "float" };
 }
 function validateRerank(body) {

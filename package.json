@@ -2,7 +2,7 @@
   "name": "newapi-cloudflare-plugin",
   "private": true,
   "type": "module",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "NewAPI Cloudflare Workers AI Task Plugin v1",
   "scripts": {
     "test": "node --test tests/*.test.mjs"
